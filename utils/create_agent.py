@@ -19,6 +19,7 @@ from networks.equivariant_sac_net import EquivariantSACActorSO2, EquivariantSACC
 from networks.equivariant_sac_net import EquivariantSACActorO2, EquivariantSACCriticO2
 from networks.curl_sac_net import CURLSACCritic, CURLSACGaussianPolicy, CURLSACEncoderOri, CURLSACEncoder
 from networks.dqn_net import DQNComCURL, DQNComCURLOri
+from networks.point_net import PointQNet
 
 def createAgent(test=False):
     print('initializing agent')
@@ -46,6 +47,9 @@ def createAgent(test=False):
             net = CNNCom((obs_channel, crop_size, crop_size), n_p=n_p, n_theta=n_theta).to(device)
         elif model == 'equi':
             net = EquivariantCNNCom(n_p=n_p, n_theta=n_theta, initialize=initialize).to(device)
+        elif model == 'point_net':
+            assert(env_config['obs_type'] == 'point_cloud')
+            net = PointQNet(in_channels=5, dim_actions=4) 
         else:
             raise NotImplementedError
         agent.initNetwork(net, initialize_target=not test)

@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 from agents.dqn_base import DQNBase
 from utils import torch_utils
+from utils.parameters import env_config
 
 class DQNAgentCom(DQNBase):
     """
@@ -29,12 +30,18 @@ class DQNAgentCom(DQNBase):
         else:
             net = self.policy_net
 
-        state_tile = state.reshape(state.size(0), 1, 1, 1).repeat(1, 1, obs.shape[2], obs.shape[3])
-        stacked = torch.cat([obs, state_tile], dim=1)
-        q = net(stacked.to(self.device))
+        if env_config['obs_type'] == 'pixel':
+            state_tile = state.reshape(state.size(0), 1, 1, 1).repeat(1, 1, obs.shape[2], obs.shape[3])
+            stacked = torch.cat([obs, state_tile], dim=1)
+            q = net(stacked.to(self.device))
+        elif env_config['obs_type'] == 'point_cloud':
+            state_tile = state.reshape(state.size(0), 1, 1).repeat(1, obs.shape[1], 3)
+            #TODO: concatenate this on channel dimension
+            q = net(obs)
         if to_cpu:
             q = q.to('cpu')
         q = q.reshape(state.shape[0], self.n_xy, self.n_z, self.n_theta, self.n_p)
+        print("QMAP shape: ", q.shape)
         return q
 
     def getEGreedyActions(self, state, obs, eps):

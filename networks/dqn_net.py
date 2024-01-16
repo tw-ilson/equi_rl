@@ -49,6 +49,7 @@ class CNNCom(nn.Module):
     def forward(self, x):
         batch_size = x.shape[0]
         q = self.conv(x)
+        print(q.shape)
         q = q.reshape(batch_size, self.n_inv, 9).permute(0, 2, 1)
         return q
 

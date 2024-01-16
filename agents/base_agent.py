@@ -86,20 +86,20 @@ class BaseAgent:
             is_experts.append(d.expert)
         states_tensor = torch.tensor(np.stack(states)).long().to(self.device)
         obs_tensor = torch.tensor(np.stack(images)).to(self.device)
-        if len(obs_tensor.shape) == 3:
+        if len(obs_tensor.shape) == 3 and obs_type == 'pixel':
             obs_tensor = obs_tensor.unsqueeze(1)
         action_tensor = torch.tensor(np.stack(xys)).to(self.device)
         rewards_tensor = torch.tensor(np.stack(rewards)).to(self.device)
         next_states_tensor = torch.tensor(np.stack(next_states)).long().to(self.device)
         next_obs_tensor = torch.tensor(np.stack(next_obs)).to(self.device)
-        if len(next_obs_tensor.shape) == 3:
+        if len(next_obs_tensor.shape) == 3 and obs_type == 'pixel':
             next_obs_tensor = next_obs_tensor.unsqueeze(1)
         dones_tensor = torch.tensor(np.stack(dones)).int()
         non_final_masks = (dones_tensor ^ 1).float().to(self.device)
         step_lefts_tensor = torch.tensor(np.stack(step_lefts)).to(self.device)
         is_experts_tensor = torch.tensor(np.stack(is_experts)).bool().to(self.device)
 
-        if obs_type is 'pixel':
+        if obs_type == 'pixel':
             # scale observation from int to float
             obs_tensor = obs_tensor/255*0.4
             next_obs_tensor = next_obs_tensor/255*0.4

@@ -111,7 +111,8 @@ if env in ['close_loop_clutter_picking', 'close_loop_block_picking']:
     view_scale = 1.
 else:
     view_scale = 1.5
-obs_type = args.obs_type
+if args.obs_type == parser.get_default('obs_type'): 
+    obs_type = 'point_cloud' if args.model == 'point_net' else args.obs_type
 if env in ['close_loop_block_stacking', 'close_loop_house_building_1', 'close_loop_block_pulling']:
     num_objects = 2
 elif env == 'close_loop_clutter_picking':

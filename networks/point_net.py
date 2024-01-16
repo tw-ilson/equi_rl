@@ -32,8 +32,8 @@ class TNet(nn.Module):
       xb = F.relu(self.bn5(self.fc2(xb)))
       
       # input-wise trainable params
-      bias = torch.eye(self.dim, requires_grad=True).repeat(bs,1,1)
       matrix = self.fc3(xb).view(-1,self.dim,self.dim) 
+      bias = torch.eye(self.dim, requires_grad=True).repeat(bs,1,1).to(matrix.device)
       return matrix + bias
 
 class TNetBlock(nn.Module):
@@ -93,14 +93,17 @@ class QNetMLP(nn.Module):
         return x
 
 class PointQNet(nn.Module):
-    def __init__(self, dim_actions) -> None:
+    def __init__(self, n_p=2, n_theta=1, in_channels=3) -> None:
         super().__init__()
+        self.n_inv = 3 * n_theta * n_p
         latent_dim = 1024
-        self.backbone = PointNetBackbone(latent_dim)
-        self.qnet = QNetMLP(dim_in=latent_dim, dim_out=dim_actions)
+        self.backbone = PointNetBackbone(in_channels=in_channels, global_dim=latent_dim)
+        self.qnet = QNetMLP(dim_in=latent_dim, dim_out=(self.n_inv*9))
 
     def forward(self, x):
+        B, N, C = x.shape
         x, tmat3, tmat64 = self.backbone(x)
-        x = self.qnet(x)
-        return x, tmat3, tmat64
+        q = self.qnet(x)
+        q = q.reshape(B, self.n_inv, 9).permute(0, 2, 1) # create Q-MAP
+        return q, tmat3, tmat64
 

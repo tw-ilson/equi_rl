@@ -4,15 +4,17 @@ import time
 import copy
 import collections
 from tqdm import tqdm
+import datetime
+import matplotlib
+matplotlib.use('Agg')
 
+# sys.path.append('./')
 sys.path.append('..')
-sys.path.append('../helping_hands_rl_envs')
 from utils.parameters import *
 from storage.buffer import QLearningBufferExpert, QLearningBuffer
 from storage.per_buffer import PrioritizedQLearningBuffer, EXPERT, NORMAL
 from storage.aug_buffer import QLearningBufferAug
 from storage.per_aug_buffer import PrioritizedQLearningBufferAug
-from utils.logger import Logger
 from utils.schedules import LinearSchedule
 from utils.env_wrapper import EnvWrapper
 
@@ -20,6 +22,9 @@ from utils.create_agent import createAgent
 import threading
 
 from utils.torch_utils import ExpertTransition, normalizeTransition, augmentBuffer
+
+# use this logger
+from bulletarm_baselines.logger.baseline_logger import BaselineLogger
 
 def set_seed(s):
     np.random.seed(s)
@@ -35,14 +40,11 @@ def train_step(agent, replay_buffer, logger, p_beta_schedule):
         loss, td_error = agent.update(batch)
         new_priorities = np.abs(td_error.cpu()) + np.stack([t.expert for t in batch]) * per_expert_eps + per_eps
         replay_buffer.update_priorities(batch_idxes, new_priorities)
-        logger.expertSampleBookkeeping(
-            np.stack(list(zip(*batch))[-1]).sum() / batch_size)
     else:
         batch = replay_buffer.sample(batch_size)
         loss, td_error = agent.update(batch)
 
-    logger.trainingBookkeeping(loss, td_error.mean().item())
-    logger.num_training_steps += 1
+    logger.logTrainingStep(loss)
     if logger.num_training_steps % target_update_freq == 0:
         agent.updateTarget()
 
@@ -51,26 +53,18 @@ def preTrainCURLStep(agent, replay_buffer, logger):
         batch, weights, batch_idxes = replay_buffer.sample(batch_size, per_beta)
     else:
         batch = replay_buffer.sample(batch_size)
-    loss = agent.updateCURLOnly(batch)
-    logger.trainingBookkeeping(loss, 0)
+    agent.updateCURLOnly(batch)
 
 def saveModelAndInfo(logger, agent):
-    logger.saveModel(logger.num_steps, env, agent)
-    logger.saveLearningCurve(100)
-    logger.saveLossCurve(100)
-    logger.saveTdErrorCurve(100)
-    logger.saveExpertSampleCurve(100)
-    logger.saveEvalCurve()
-    logger.saveRewards()
-    logger.saveLosses()
-    logger.saveTdErrors()
-    logger.saveEvalRewards()
+    logger.writeLog()
+    logger.exportData()
+    agent.saveModel(os.path.join(logger.models_dir, 'snapshot'))
+
 
 def evaluate(envs, agent, logger):
     states, obs = envs.reset()
     evaled = 0
     temp_reward = [[] for _ in range(num_eval_processes)]
-    eval_rewards = []
     if not no_bar:
         eval_bar = tqdm(total=num_eval_episodes)
     while evaled < num_eval_episodes:
@@ -88,11 +82,13 @@ def evaluate(envs, agent, logger):
                 R = 0
                 for r in reversed(temp_reward[i]):
                     R = r + gamma * R
-                eval_rewards.append(R)
+                logger.logEvalEpisode(temp_reward[i], discounted_return=R)
                 temp_reward[i] = []
         if not no_bar:
             eval_bar.update(evaled - eval_bar.n)
-    logger.eval_rewards.append(np.mean(eval_rewards[:num_eval_episodes]))
+    # logger.eval_rewards.append(np.mean(eval_rewards[:num_eval_episodes]))
+    logger.logEvalInterval()
+    logger.writeLog()
     if not no_bar:
         eval_bar.close()
 
@@ -119,13 +115,19 @@ def train():
         agent.loadModel(load_model_pre)
 
     # logging
-    log_dir = os.path.join(log_pre, '{}_{}'.format(alg, model))
+    base_dir = os.path.join(log_pre, '{}_{}_{}'.format(alg, model, env))
     if note:
-        log_dir += '_'
-        log_dir += note
+        base_dir += '_'
+        base_dir += note
+    if not log_sub:
+        timestamp = time.time()
+        timestamp = datetime.datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d.%H:%M:%S')
+        log_dir = os.path.join(base_dir, timestamp)
+    else:
+        log_dir = os.path.join(base_dir, log_sub)
 
-    logger = Logger(log_dir, env, 'train', num_processes, max_train_step, gamma, log_sub)
     hyper_parameters['model_shape'] = agent.getModelStr()
+    logger = BaselineLogger(log_dir, checkpoint_interval=save_freq, num_eval_eps=num_eval_episodes, hyperparameters=hyper_parameters, eval_freq=eval_freq)
     logger.saveParameters(hyper_parameters)
 
     if buffer_type == 'per':
@@ -146,10 +148,7 @@ def train():
     p_beta_schedule = LinearSchedule(schedule_timesteps=max_train_step, initial_p=per_beta, final_p=1.0)
 
     if load_sub:
-        logger.loadCheckPoint(os.path.join(log_dir, load_sub, 'checkpoint'), envs, agent, replay_buffer)
-
-    if load_buffer is not None and not load_sub:
-        logger.loadBuffer(replay_buffer, load_buffer, load_n)
+        logger.loadCheckPoint(os.path.join(base_dir, load_sub, 'checkpoint'), agent.loadFromState, replay_buffer.loadFromState)
 
     if planner_episode > 0 and not load_sub:
         planner_envs = envs
@@ -159,35 +158,26 @@ def train():
         s = 0
         if not no_bar:
             planner_bar = tqdm(total=planner_episode)
-        local_transitions = []
         while j < planner_episode:
             plan_actions = planner_envs.getNextAction()
             planner_actions_star_idx, planner_actions_star = agent.getActionFromPlan(plan_actions)
             states_, obs_, rewards, dones = planner_envs.step(planner_actions_star, auto_reset=True)
-            steps_lefts = planner_envs.getStepLeft()
             for i in range(planner_num_process):
                 transition = ExpertTransition(states[i].numpy(), obs[i].numpy(), planner_actions_star_idx[i].numpy(),
                                               rewards[i].numpy(), states_[i].numpy(), obs_[i].numpy(), dones[i].numpy(),
-                                              steps_lefts[i].numpy(), np.array(1))
+                                              np.array(100), np.array(1))
                 if obs_type == 'pixel':
                     transition = normalizeTransition(transition)
-                # replay_buffer.add(transition)
-                local_transitions.append(transition)
+                replay_buffer.add(transition)
             states = copy.copy(states_)
             obs = copy.copy(obs_)
 
-            if dones.sum() and rewards.sum():
-                for t in local_transitions:
-                    replay_buffer.add(t)
-                local_transitions = []
-                j += dones.sum().item()
-                s += rewards.sum().item()
-                if not no_bar:
-                    planner_bar.set_description('{:.3f}/{}, AVG: {:.3f}'.format(s, j, float(s) / j if j != 0 else 0))
-                    planner_bar.update(dones.sum().item())
-            elif dones.sum():
-                local_transitions = []
+            j += dones.sum().item()
+            s += rewards.sum().item()
 
+            if not no_bar:
+                planner_bar.set_description('{:.3f}/{}, AVG: {:.3f}'.format(s, j, float(s)/j if j != 0 else 0))
+                planner_bar.update(dones.sum().item())
         if expert_aug_n > 0:
             augmentBuffer(replay_buffer, buffer_aug_type, expert_aug_n)
 
@@ -201,23 +191,21 @@ def train():
                     pre_train_bar.update(1)
 
     # pre train
-    if pre_train_step > 0 and not load_sub and not load_model_pre:
+    if pre_train_step > 0:
         pbar = tqdm(total=pre_train_step)
-        for i in range(pre_train_step):
+        while logger.num_training_steps < pre_train_step:
             t0 = time.time()
             train_step(agent, replay_buffer, logger, p_beta_schedule)
             if logger.num_training_steps % 1000 == 0:
                 logger.saveLossCurve(100)
-                logger.saveTdErrorCurve(100)
             if not no_bar:
                 pbar.set_description('loss: {:.3f}, time: {:.2f}'.format(float(logger.getCurrentLoss()), time.time()-t0))
-                pbar.update()
+                pbar.update(len(logger.num_training_steps)-pbar.n)
 
             if (time.time() - start_time) / 3600 > time_limit:
-                logger.saveCheckPoint(args, envs, agent, replay_buffer)
+                logger.saveCheckPoint(agent.getSaveState(), replay_buffer.getSaveState())
                 exit(0)
         pbar.close()
-        logger.saveModel(0, 'pretrain', agent)
 
     if not no_bar:
         pbar = tqdm(total=max_train_step)
@@ -241,7 +229,6 @@ def train():
                 train_step(agent, replay_buffer, logger, p_beta_schedule)
 
         states_, obs_, rewards, dones = envs.stepWait()
-        steps_lefts = envs.getStepLeft()
 
         done_idxes = torch.nonzero(dones).squeeze(1)
         if done_idxes.shape[0] != 0:
@@ -254,11 +241,11 @@ def train():
             for i in range(num_processes):
                 transition = ExpertTransition(states[i].numpy(), obs[i].numpy(), actions_star_idx[i].numpy(),
                                               rewards[i].numpy(), states_[i].numpy(), obs_[i].numpy(), dones[i].numpy(),
-                                              steps_lefts[i].numpy(), np.array(is_expert))
+                                              np.array(100), np.array(is_expert))
                 if obs_type == 'pixel':
                     transition = normalizeTransition(transition)
                 replay_buffer.add(transition)
-        logger.stepBookkeeping(rewards.numpy(), steps_lefts.numpy(), dones.numpy())
+        logger.logStep(rewards.numpy(), dones.numpy())
 
         states = copy.copy(states_)
         obs = copy.copy(obs_)
@@ -268,13 +255,12 @@ def train():
 
         if not no_bar:
             timer_final = time.time()
-            description = 'Action Step:{}; Episode: {}; Reward:{:.03f}; Eval Reward:{:.03f}; Explore:{:.02f}; Loss:{:.03f}; Time:{:.03f}'.format(
-                logger.num_steps, logger.num_episodes, logger.getCurrentAvgReward(100), logger.eval_rewards[-1] if len(logger.eval_rewards) > 0 else 0, eps, float(logger.getCurrentLoss()),
+            description = 'Action Step:{}; Reward:{:.03f}; Eval Reward:{:.03f}; Explore:{:.02f}; Loss:{:.03f}; Time:{:.03f}'.format(
+                logger.num_steps, logger.getAvg(logger.training_eps_rewards, 100), np.mean(logger.eval_eps_rewards[-2]) if len(logger.eval_eps_rewards) > 1 and len(logger.eval_eps_rewards[-2]) > 0 else 0, eps, float(logger.getCurrentLoss()),
                 timer_final - timer_start)
             pbar.set_description(description)
             timer_start = timer_final
             pbar.update(logger.num_training_steps-pbar.n)
-        logger.num_steps += num_processes
 
         if logger.num_training_steps > 0 and eval_freq > 0 and logger.num_training_steps % eval_freq == 0:
             if eval_thread is not None:
@@ -290,9 +276,7 @@ def train():
     if eval_thread is not None:
         eval_thread.join()
     saveModelAndInfo(logger, agent)
-    logger.saveCheckPoint(args, envs, agent, replay_buffer)
-    if logger.num_training_steps >= max_train_step:
-        logger.saveResult()
+    logger.saveCheckPoint(agent.getSaveState(), replay_buffer.getSaveState())
     envs.close()
     eval_envs.close()
     print('training finished')

@@ -49,7 +49,7 @@ def createAgent(test=False):
             net = EquivariantCNNCom(n_p=n_p, n_theta=n_theta, initialize=initialize).to(device)
         elif model == 'point_net':
             assert(env_config['obs_type'] == 'point_cloud')
-            net = PointQNet(in_channels=5, dim_actions=4) 
+            net = PointQNet(in_channels=6, n_p=n_p, n_theta=n_theta).to(device)
         else:
             raise NotImplementedError
         agent.initNetwork(net, initialize_target=not test)

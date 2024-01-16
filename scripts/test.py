@@ -1,9 +1,12 @@
 import copy
 import collections
+import sys
 from tqdm import tqdm
 
 import matplotlib.pyplot as plt
 
+sys.path.append('..')
+sys.path.append('../helping_hands_rl_envs')
 from utils.create_agent import createAgent
 from utils.parameters import *
 from utils.env_wrapper import EnvWrapper
@@ -13,7 +16,7 @@ def test():
     envs = EnvWrapper(num_processes, simulator, env, env_config, planner_config)
     agent = createAgent(test=True)
     agent.train()
-    agent.loadModel(load_model_pre)
+    # agent.loadModel(load_model_pre)
     states, obs = envs.reset()
     test_episode = 1000
     total = 0

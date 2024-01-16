@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 from agents.dqn_base import DQNBase
 from utils import torch_utils
-from utils.parameters import env_config
+from utils.parameters import obs_type
 
 class DQNAgentCom(DQNBase):
     """
@@ -30,19 +30,18 @@ class DQNAgentCom(DQNBase):
         else:
             net = self.policy_net
 
-        if env_config['obs_type'] == 'pixel':
+        if obs_type == 'pixel':
             state_tile = state.reshape(state.size(0), 1, 1, 1).repeat(1, 1, obs.shape[2], obs.shape[3])
             stacked = torch.cat([obs, state_tile], dim=1)
             q = net(stacked.to(self.device))
-        elif env_config['obs_type'] == 'point_cloud':
+        elif obs_type == 'point_cloud':
             state_tile = state.reshape(state.size(0), 1, 1).repeat(1, obs.shape[1], 3)
-            #TODO: concatenate this on channel dimension
-            q = net(obs)
+            stacked = torch.cat([obs, state_tile], dim=2)
+            q, tmatA, tmatB = net(stacked.to(self.device))
         if to_cpu:
             q = q.to('cpu')
         q = q.reshape(state.shape[0], self.n_xy, self.n_z, self.n_theta, self.n_p)
-        print("QMAP shape: ", q.shape)
-        return q
+        return q, tmatA, tmatB
 
     def getEGreedyActions(self, state, obs, eps):
         """
@@ -54,6 +53,7 @@ class DQNAgentCom(DQNBase):
         """
         with torch.no_grad():
             q = self.forwardNetwork(state, obs, to_cpu=True)
+            q = q[0] if obs_type == 'point_cloud' else q
             argmax = torch_utils.argmax4d(q)
             dxy_id = argmax[:, 0]
             dz_id = argmax[:, 1]
@@ -85,14 +85,25 @@ class DQNAgentCom(DQNBase):
 
         with torch.no_grad():
             q_all_prime = self.forwardNetwork(next_states, next_obs, target_net=True)
+            q_all_prime = q_all_prime[0] if obs_type == 'point_cloud' else q_all_prime
             q_prime = q_all_prime.reshape(batch_size, -1).max(1)[0]
             q_target = rewards + self.gamma * q_prime * non_final_masks
 
         q = self.forwardNetwork(states, obs)
+        if obs_type == 'point_cloud':
+            q, tmatA, tmatB = q
+            # regularize T matrix with loss
+            idA = torch.eye(tmatA.shape[1], requires_grad=True).repeat(batch_size, 1, 1).to(tmatA.device)
+            idB = torch.eye(tmatB.shape[1], requires_grad=True).repeat(batch_size, 1, 1).to(tmatB.device)
+            diffA = tmatA - torch.bmm(tmatA, tmatA.transpose(1,2))
+            diffB = tmatB - torch.bmm(tmatB, tmatB.transpose(1,2))
+            pn_reg = 1e-4 * (torch.norm(diffA) + torch.norm(diffB)) / float(batch_size)
         q_pred = q[torch.arange(batch_size), dxy_id, dz_id, dtheta_id, p_id]
         self.loss_calc_dict['q_output'] = q
         self.loss_calc_dict['q_pred'] = q_pred
         td_loss = F.smooth_l1_loss(q_pred, q_target)
+        if obs_type == 'point_cloud':
+            td_loss += pn_reg
         with torch.no_grad():
             td_error = torch.abs(q_pred - q_target)
         return td_loss, td_error

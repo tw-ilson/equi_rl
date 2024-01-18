@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from utils import torch_utils
+from .sac_net import SACGaussianPolicyBase
+
 class TNet(nn.Module):
    def __init__(self, dim=3):
       super().__init__()
@@ -107,3 +110,49 @@ class PointQNet(nn.Module):
         q = q.reshape(B, self.n_inv, 9).permute(0, 2, 1) # create Q-MAP
         return q, tmat3, tmat64
 
+class SACCriticPointNet(nn.Module):
+    
+    def __init__(self, in_channels=3, action_dim=5) -> None:
+        super().__init__()
+        self.backbone = PointNetBackbone(in_channels=in_channels, global_dim=128)
+        # Q1
+        self.critic_fc_1 = torch.nn.Sequential(
+            torch.nn.Linear(128+action_dim, 128),
+            nn.ReLU(inplace=True),
+            torch.nn.Linear(128, 1)
+        )
+
+        # Q2
+        self.critic_fc_2 = torch.nn.Sequential(
+            torch.nn.Linear(128+action_dim, 128),
+            nn.ReLU(inplace=True),
+            torch.nn.Linear(128, 1)
+        )
+
+        self.apply(torch_utils.weights_init)
+
+    def forward(self, x, act):
+        pn_out, tmatA, tmatB = self.backbone(x)
+        out_1 = self.critic_fc_1(torch.cat((pn_out, act), dim=1))
+        out_2 = self.critic_fc_2(torch.cat((pn_out, act), dim=1))
+        return out_1, out_2
+
+LOG_SIG_MAX = 2
+LOG_SIG_MIN = -20
+epsilon = 1e-6
+
+class SACGaussianPointNetPolicy(SACGaussianPolicyBase):
+    def __init__(self, in_channels=3, action_dim=5):
+        super().__init__()
+        self.backbone = PointNetBackbone(in_channels=in_channels, global_dim=128)
+        self.mean_linear = nn.Linear(128, action_dim)
+        self.log_std_linear = nn.Linear(128, action_dim)
+
+        self.apply(torch_utils.weights_init)
+
+    def forward(self, x):
+        x, tmatA, tmatB = self.backbone(x)
+        mean = self.mean_linear(x)
+        log_std = self.log_std_linear(x)
+        log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
+        return mean, log_std

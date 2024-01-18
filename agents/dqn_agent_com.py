@@ -90,6 +90,7 @@ class DQNAgentCom(DQNBase):
             q_target = rewards + self.gamma * q_prime * non_final_masks
 
         q = self.forwardNetwork(states, obs)
+
         if obs_type == 'point_cloud':
             q, tmatA, tmatB = q
             # regularize T matrix with loss

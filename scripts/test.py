@@ -6,16 +6,15 @@ from tqdm import tqdm
 import matplotlib.pyplot as plt
 
 sys.path.append('..')
-sys.path.append('../helping_hands_rl_envs')
 from utils.create_agent import createAgent
 from utils.parameters import *
 from utils.env_wrapper import EnvWrapper
 
 def test():
     plt.style.use('default')
-    envs = EnvWrapper(num_processes, simulator, env, env_config, planner_config)
+    envs = EnvWrapper(num_processes, 'pybullet', env, env_config, planner_config)
     agent = createAgent(test=True)
-    agent.train()
+    agent.eval()
     # agent.loadModel(load_model_pre)
     states, obs = envs.reset()
     test_episode = 1000
@@ -24,8 +23,10 @@ def test():
     step_times = []
     pbar = tqdm(total=test_episode)
     while total < 1000:
+        # states = states.unsqueeze(0)
+        # obs = obs.unsqueeze(0)
         actions_star_idx, actions_star = agent.getGreedyActions(states, obs)
-        states_, obs_, rewards, dones = envs.step(actions_star, auto_reset=True)
+        states_, obs_, rewards, dones = envs.step(actions_star.squeeze(), auto_reset=True)
 
         states = copy.copy(states_)
         obs = copy.copy(obs_)

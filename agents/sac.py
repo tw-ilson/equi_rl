@@ -3,7 +3,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from copy import deepcopy
-from utils.parameters import heightmap_size, crop_size
+from networks.point_net import pointnet_regularization
+from utils.parameters import heightmap_size, crop_size, model
 from utils.torch_utils import centerCrop
 
 class SAC(A2CBase):
@@ -111,11 +112,14 @@ class SAC(A2CBase):
         :return: unscaled_actions (in range (-1, 1)), actions (in true scale)
         """
         with torch.no_grad():
-            if self.obs_type is 'pixel':
+            if self.obs_type == 'pixel':
                 state_tile = state.reshape(state.size(0), 1, 1, 1).repeat(1, 1, obs.shape[2], obs.shape[3])
                 obs = torch.cat([obs, state_tile], dim=1).to(self.device)
                 if heightmap_size > crop_size:
                     obs = centerCrop(obs, out=crop_size)
+            elif self.obs_type == 'point_cloud':
+                state_tile = state.reshape(state.size(0), 1, 1).repeat(1, obs.shape[1], 3)
+                obs = torch.cat([obs, state_tile], dim=2).to(self.device)
             else:
                 obs = obs.to(self.device)
 
@@ -133,10 +137,13 @@ class SAC(A2CBase):
         """
         batch_size, states, obs, action_idx, rewards, next_states, next_obs, non_final_masks, step_lefts, is_experts = super()._loadLossCalcDict()
 
-        if self.obs_type is 'pixel':
+        if self.obs_type == 'pixel':
             # stack state as the second channel of the obs
             obs = torch.cat([obs, states.reshape(states.size(0), 1, 1, 1).repeat(1, 1, obs.shape[2], obs.shape[3])], dim=1)
             next_obs = torch.cat([next_obs, next_states.reshape(next_states.size(0), 1, 1, 1).repeat(1, 1, next_obs.shape[2], next_obs.shape[3])], dim=1)
+        elif self.obs_type == 'point_cloud':
+            # raise NotImplementedError
+            pass
 
         return batch_size, states, obs, action_idx, rewards, next_states, next_obs, non_final_masks, step_lefts, is_experts
 
@@ -146,15 +153,23 @@ class SAC(A2CBase):
         :return: actor loss
         """
         batch_size, states, obs, action, rewards, next_states, next_obs, non_final_masks, step_lefts, is_experts = self._loadLossCalcDict()
+        #NOTE: which is the right way to reshape input?
+        obs = torch.cat([obs, torch.zeros_like(obs)], dim=-1)
         pi, log_pi, mean = self.actor.sample(obs)
         self.loss_calc_dict['pi'] = pi
         self.loss_calc_dict['mean'] = mean
         self.loss_calc_dict['log_pi'] = log_pi
 
-        qf1_pi, qf2_pi = self.critic(obs, pi)
+        if model == 'point_net':
+            qf1_pi, qf2_pi, tmatA, tmatB = self.critic(obs, pi)
+            pn_reg = pointnet_regularization(tmatA, tmatB)
+        else:
+            qf1_pi, qf2_pi = self.critic(obs, pi)
         min_qf_pi = torch.min(qf1_pi, qf2_pi)
 
         policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean()  # Jπ = 𝔼st∼D,εt∼N[α * logπ(f(εt;st)|st) − Q(st,f(εt;st))]
+        if model == 'point_net':
+            policy_loss += pn_reg
 
         return policy_loss
 
@@ -164,19 +179,38 @@ class SAC(A2CBase):
         :return: q1 loss, q2 loss, td error
         """
         batch_size, states, obs, action, rewards, next_states, next_obs, non_final_masks, step_lefts, is_experts = self._loadLossCalcDict()
+
+        #NOTE: which is the right way to reshape input?
+        if self.obs_type == 'point_cloud':
+            next_obs = torch.cat([next_obs, torch.zeros_like(next_obs)], dim=-1)
+            # next_obs = torch.cat([next_obs, next_states.reshape(next_states.size(0), 1, 1).repeat(1, next_obs.shape[1], 3)], dim=-1)
+            obs = torch.cat([obs, torch.zeros_like(obs)], dim=-1)
+            # obs = torch.cat([obs, states.reshape(states.size(0), 1, 1).repeat(1, obs.shape[1], 3)], dim=-1)
+
         with torch.no_grad():
             next_state_action, next_state_log_pi, _ = self.actor.sample(next_obs)
             next_state_log_pi = next_state_log_pi.reshape(batch_size)
-            qf1_next_target, qf2_next_target = self.critic_target(next_obs, next_state_action)
+            if model == 'point_net':
+                qf1_next_target, qf2_next_target, _, _ = self.critic_target(next_obs, next_state_action)
+            else:
+                qf1_next_target, qf2_next_target = self.critic_target(next_obs, next_state_action)
             qf1_next_target = qf1_next_target.reshape(batch_size)
             qf2_next_target = qf2_next_target.reshape(batch_size)
             min_qf_next_target = torch.min(qf1_next_target, qf2_next_target) - self.alpha * next_state_log_pi
             next_q_value = rewards + non_final_masks * self.gamma * min_qf_next_target
-        qf1, qf2 = self.critic(obs, action)  # Two Q-functions to mitigate positive bias in the policy improvement step
+        
+        if model == 'point_net':
+            qf1, qf2, tmatA, tmatB = self.critic(obs, action)
+            pn_reg = pointnet_regularization(tmatA, tmatB)
+        else:
+            qf1, qf2 = self.critic(obs, action)  # Two Q-functions to mitigate positive bias in the policy improvement step
         qf1 = qf1.reshape(batch_size)
         qf2 = qf2.reshape(batch_size)
         qf1_loss = F.mse_loss(qf1, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
         qf2_loss = F.mse_loss(qf2, next_q_value)  # JQ = 𝔼(st,at)~D[0.5(Q1(st,at) - r(st,at) - γ(𝔼st+1~p[V(st+1)]))^2]
+        if model == 'point_net':
+            qf1_loss += pn_reg 
+            qf1_loss += pn_reg 
         with torch.no_grad():
             td_error = 0.5 * (torch.abs(qf2 - next_q_value) + torch.abs(qf1 - next_q_value))
         return qf1_loss, qf2_loss, td_error

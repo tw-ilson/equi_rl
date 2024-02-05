@@ -4,6 +4,7 @@ import torch.nn.functional as F
 from agents.dqn_base import DQNBase
 from utils import torch_utils
 from utils.parameters import obs_type
+from networks.point_net import pointnet_regularization
 
 class DQNAgentCom(DQNBase):
     """
@@ -94,11 +95,7 @@ class DQNAgentCom(DQNBase):
         if obs_type == 'point_cloud':
             q, tmatA, tmatB = q
             # regularize T matrix with loss
-            idA = torch.eye(tmatA.shape[1], requires_grad=True).repeat(batch_size, 1, 1).to(tmatA.device)
-            idB = torch.eye(tmatB.shape[1], requires_grad=True).repeat(batch_size, 1, 1).to(tmatB.device)
-            diffA = tmatA - torch.bmm(tmatA, tmatA.transpose(1,2))
-            diffB = tmatB - torch.bmm(tmatB, tmatB.transpose(1,2))
-            pn_reg = 1e-4 * (torch.norm(diffA) + torch.norm(diffB)) / float(batch_size)
+            pn_reg = pointnet_regularization(tmatA, tmatB)
         q_pred = q[torch.arange(batch_size), dxy_id, dz_id, dtheta_id, p_id]
         self.loss_calc_dict['q_output'] = q
         self.loss_calc_dict['q_pred'] = q_pred

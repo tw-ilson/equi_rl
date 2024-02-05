@@ -5,6 +5,15 @@ import torch.nn.functional as F
 from utils import torch_utils
 from .sac_net import SACGaussianPolicyBase
 
+def pointnet_regularization(tmatA, tmatB):
+    batch_size = tmatA.shape[0]
+    idA = torch.eye(tmatA.shape[1], requires_grad=True).repeat(batch_size, 1, 1).to(tmatA.device)
+    idB = torch.eye(tmatB.shape[1], requires_grad=True).repeat(batch_size, 1, 1).to(tmatB.device)
+    diffA = tmatA - torch.bmm(tmatA, tmatA.transpose(1,2))
+    diffB = tmatB - torch.bmm(tmatB, tmatB.transpose(1,2))
+    pn_reg = 1e-4 * (torch.norm(diffA) + torch.norm(diffB)) / float(batch_size)
+    return pn_reg
+
 class TNet(nn.Module):
    def __init__(self, dim=3):
       super().__init__()
@@ -135,7 +144,7 @@ class SACCriticPointNet(nn.Module):
         pn_out, tmatA, tmatB = self.backbone(x)
         out_1 = self.critic_fc_1(torch.cat((pn_out, act), dim=1))
         out_2 = self.critic_fc_2(torch.cat((pn_out, act), dim=1))
-        return out_1, out_2
+        return out_1, out_2, tmatA, tmatB
 
 LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
@@ -155,4 +164,4 @@ class SACGaussianPointNetPolicy(SACGaussianPolicyBase):
         mean = self.mean_linear(x)
         log_std = self.log_std_linear(x)
         log_std = torch.clamp(log_std, min=LOG_SIG_MIN, max=LOG_SIG_MAX)
-        return mean, log_std
+        return mean, log_std, tmatA, tmatB

@@ -8,10 +8,11 @@ from torch.autograd import Variable
 import numpy as np
 import cv2
 import collections
-from utils.parameters import crop_size
+from utils.parameters import crop_size, obs_type
 
 from collections import OrderedDict
 from scipy.ndimage import affine_transform
+from scipy.spatial.transform import Rotation, rotation
 
 ExpertTransition = collections.namedtuple('ExpertTransition', 'state obs action reward next_state next_obs done step_left expert')
 
@@ -105,13 +106,24 @@ def get_image_transform(theta, trans, pivot=(0, 0)):
     # Get 2D rigid transformation matrix that rotates an image by theta (in
     # radians) around pivot (in pixels) and translates by trans vector (in
     # pixels)
-    pivot_t_image = np.array([[1., 0., -pivot[0]], [0., 1., -pivot[1]],
+    pivot_t_image = np.array([[1., 0., -pivot[0]],
+                              [0., 1., -pivot[1]],
                               [0., 0., 1.]])
-    image_t_pivot = np.array([[1., 0., pivot[0]], [0., 1., pivot[1]],
+    image_t_pivot = np.array([[1., 0., pivot[0]],
+                              [0., 1., pivot[1]],
                               [0., 0., 1.]])
     transform = np.array([[np.cos(theta), -np.sin(theta), trans[0]],
-                          [np.sin(theta), np.cos(theta), trans[1]], [0., 0., 1.]])
+                          [np.sin(theta), np.cos(theta), trans[1]],
+                          [0., 0., 1.]])
     return np.dot(image_t_pivot, np.dot(transform, pivot_t_image))
+
+def get_pcd_transform(theta, trans):
+    transform = np.eye(4)
+    transform[:3, :3] = Rotation.from_euler('xyz', theta, degrees=False).as_matrix()
+    transform[:3, 3] = trans
+    return transform
+
+    
 
 # code for this function from: https://github.com/google-research/ravens/blob/d11b3e6d35be0bd9811cfb5c222695ebaf17d28a/ravens/utils/utils.py#L418
 #
@@ -134,6 +146,11 @@ def get_random_image_transform_params(image_size):
     trans = np.random.randint(0, image_size[0]//10, 2) - image_size[0]//20
     pivot = (image_size[1] / 2, image_size[0] / 2)
     return theta, trans, pivot
+
+def get_random_pcd_transform_params(pcd):
+    theta = np.random.random(3) * 2*np.pi
+    trans = np.random.random(3) * np.linalg.norm(np.max(pcd, axis=0))/10
+    return theta, trans
 
 # code for this function modified from: https://github.com/google-research/ravens/blob/d11b3e6d35be0bd9811cfb5c222695ebaf17d28a/ravens/utils/utils.py#L428
 #
@@ -197,7 +214,9 @@ def get_random_image_transform_params(image_size):
 #       transform[:2, :], (image_size[1], image_size[0]),
 #       flags=cv2.INTER_NEAREST)
 #   return input_image, new_pixels, new_rounded_pixels, transform_params
-def perturb(current_image, next_image, dxy, set_theta_zero=False, set_trans_zero=False):
+def perturb_image(current_image, next_image, dxy, set_theta_zero=False, set_trans_zero=False):
+    current_image = current_image.squeeze()
+    next_image = next_image.squeeze()
     image_size = current_image.shape[-2:]
 
     # Compute random rigid transform.
@@ -209,7 +228,8 @@ def perturb(current_image, next_image, dxy, set_theta_zero=False, set_trans_zero
     transform = get_image_transform(theta, trans, pivot)
     transform_params = theta, trans, pivot
 
-    rot = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]])
+    rot = np.array([[np.cos(theta), -np.sin(theta)],
+                    [np.sin(theta), np.cos(theta)]])
     rotated_dxy = rot.dot(dxy)
     rotated_dxy = np.clip(rotated_dxy, -1, 1)
 
@@ -219,6 +239,36 @@ def perturb(current_image, next_image, dxy, set_theta_zero=False, set_trans_zero
         next_image = affine_transform(next_image, np.linalg.inv(transform), mode='nearest', order=1)
 
     return current_image, next_image, rotated_dxy, transform_params
+
+def perturb_pcd(current_image, next_image, dxy, set_theta_zero=False, set_trans_zero=False):
+    current_pcd, next_pcd = current_image, next_image
+    N, C = current_pcd.shape
+
+    # Compute random rigid transform.
+    theta, trans = get_random_pcd_transform_params(current_pcd)
+    if set_theta_zero:
+        theta = 0.
+    if set_trans_zero:
+        trans = np.zeros(C)
+    transform = get_pcd_transform(theta, trans)
+    pivot = get_pcd_center(current_pcd)
+    transform_params = theta, trans, pivot
+
+    rot = np.array([[np.cos(theta), -np.sin(theta)],
+                            [np.sin(theta), np.cos(theta)]])
+    rotated_dxy = rot.dot(dxy)
+    rotated_dxy = np.clip(rotated_dxy, -1, 1)
+
+    # Apply rigid transform to image and pixel labels.
+    current_pcd = current_pcd - pivot
+    current_pcd = torch.matmul(current_pcd, torch.tensor(transform.T))
+    if next_pcd is not None:
+        next_pcd = next_pcd - get_pcd_center(next_pcd)
+        next_pcd = torch.matmul(next_pcd, torch.tensor(transform.T))
+
+    return current_pcd, next_pcd, rotated_dxy, transform_params
+
+perturb = perturb_pcd if obs_type == 'point_cloud' else perturb_image
 
 def perturbVec(current_state, next_state, dxy, set_theta_zero=False, set_trans_zero=False):
     assert not set_theta_zero
@@ -306,8 +356,8 @@ def augmentDQNTransitionC4(d):
                             next_obs, d.done, d.step_left, d.expert)
 
 def augmentTransitionSO2(d):
-    obs, next_obs, dxy, transform_params = perturb(d.obs[0].copy(),
-                                                   d.next_obs[0].copy(),
+    obs, next_obs, dxy, transform_params = perturb(d.obs.copy(),
+                                                   d.next_obs.copy(),
                                                    d.action[1:3].copy(),
                                                    set_trans_zero=True)
     obs = obs.reshape(1, *obs.shape)
@@ -320,8 +370,8 @@ def augmentTransitionSO2(d):
 
 
 def augmentTransitionSE2(d):
-    obs, next_obs, dxy, transform_params = perturb(d.obs[0].copy(),
-                                                   d.next_obs[0].copy(),
+    obs, next_obs, dxy, transform_params = perturb(d.obs.copy(),
+                                                   d.next_obs.copy(),
                                                    d.action[1:3].copy())
     obs = obs.reshape(1, *obs.shape)
     next_obs = next_obs.reshape(1, *next_obs.shape)
@@ -333,8 +383,8 @@ def augmentTransitionSE2(d):
 
 
 def augmentTransitionTranslate(d):
-    obs, next_obs, dxy, transform_params = perturb(d.obs[0].copy(),
-                                                   d.next_obs[0].copy(),
+    obs, next_obs, dxy, transform_params = perturb(d.obs.copy(),
+                                                   d.next_obs.copy(),
                                                    d.action[1:3].copy(),
                                                    set_theta_zero=True)
     obs = obs.reshape(1, *obs.shape)
@@ -420,3 +470,27 @@ def augmentBuffer(buffer, aug_t, aug_n):
             aug_list.append(augmentTransition(d, aug_t))
     for d in aug_list:
         buffer.add(d)
+
+
+###
+### Point Cloud Augmentations
+### 
+
+def get_pcd_center(pcd):
+    return np.mean(pcd, axis=-2)
+
+# def rotate_point_cloud(pcd, angles):
+#     assert(len(angles) == pcd.shape[-1])
+#     rotation_matrix = Rotation.from_euler('xyz', angles, degrees=False).as_matrix()
+#     rotated_pcd = torch.matmul(pcd, torch.tensor(rotation_matrix))
+#     return rotated_pcd
+#
+# def translate_point_cloud(pcd, translation_vector):
+#     B, N, C = pcd.shape
+#     centered_pcd = center_point_cloud(pcd)
+#     translated_pcd = centered_pcd + translation_vector.view(1, 1, C).repeat(B, N, 1)
+#     return translated_pcd
+#
+# def scale_point_cloud(pcd, scale_factor):
+#     scaled_pcd = pcd * scale_factor
+#     return scaled_pcd

@@ -19,7 +19,7 @@ from networks.equivariant_sac_net import EquivariantSACActorSO2, EquivariantSACC
 from networks.equivariant_sac_net import EquivariantSACActorO2, EquivariantSACCriticO2
 from networks.curl_sac_net import CURLSACCritic, CURLSACGaussianPolicy, CURLSACEncoderOri, CURLSACEncoder
 from networks.dqn_net import DQNComCURL, DQNComCURLOri
-from networks.point_net import PointQNet
+from networks.point_net import PointQNet, SACCriticPointNet, SACGaussianPointNetPolicy
 
 def createAgent(test=False):
     print('initializing agent')
@@ -49,6 +49,7 @@ def createAgent(test=False):
             net = EquivariantCNNCom(n_p=n_p, n_theta=n_theta, initialize=initialize).to(device)
         elif model == 'point_net':
             assert(env_config['obs_type'] == 'point_cloud')
+            #TODO: remove magic number
             net = PointQNet(in_channels=6, n_p=n_p, n_theta=n_theta).to(device)
         else:
             raise NotImplementedError
@@ -125,6 +126,9 @@ def createAgent(test=False):
                 critic = EquivariantSACCriticO2((obs_channel, crop_size, crop_size), len(action_sequence), n_hidden=n_hidden, initialize=initialize).to(device)
             else:
                 raise NotImplementedError
+        elif obs_type == 'point_cloud':
+            actor = SACGaussianPointNetPolicy(in_channels=6).to(device)
+            critic = SACCriticPointNet(in_channels=6).to(device)
         else:
             raise NotImplementedError
         agent.initNetwork(actor, critic, not test)

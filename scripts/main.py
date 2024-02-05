@@ -1,4 +1,5 @@
 import os
+import gc
 import sys
 import time
 import copy
@@ -25,6 +26,11 @@ from utils.torch_utils import ExpertTransition, normalizeTransition, augmentBuff
 
 # use this logger
 from bulletarm_baselines.logger.baseline_logger import BaselineLogger
+
+from torch.profiler import profile, record_function, ProfilerActivity
+
+# prof = profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True, profile_memory=True)
+# record_function("model_inference")
 
 def set_seed(s):
     np.random.seed(s)
@@ -261,6 +267,7 @@ def train():
             pbar.set_description(description)
             timer_start = timer_final
             pbar.update(logger.num_training_steps-pbar.n)
+            # print(prof.key_averages().table(sort_by="self_cpu_memory_usage", row_limit=10))
 
         if logger.num_training_steps > 0 and eval_freq > 0 and logger.num_training_steps % eval_freq == 0:
             if eval_thread is not None:
@@ -272,6 +279,8 @@ def train():
 
         if logger.num_steps % (num_processes * save_freq) == 0:
             saveModelAndInfo(logger, agent)
+        gc.collect()
+
 
     if eval_thread is not None:
         eval_thread.join()

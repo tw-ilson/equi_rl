@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.distributions import Normal
 from utils import torch_utils
+from utils.parameters import model, obs_type
 
 LOG_SIG_MAX = 2
 LOG_SIG_MIN = -20
@@ -12,7 +13,10 @@ class SACGaussianPolicyBase(nn.Module):
         super().__init__()
 
     def sample(self, x):
-        mean, log_std = self.forward(x)
+        if model == 'point_net':
+            mean, log_std, _, _ = self.forward(x)
+        else:
+            mean, log_std = self.forward(x)
         std = log_std.exp()
         normal = Normal(mean, std)
         x_t = normal.rsample()  # for reparameterization trick (mean + std * N(0,1))
